@@ -1,10 +1,14 @@
 import traceback
-import uuid
+import uuid, re
 from cStringIO import StringIO
 
 from twisted.python import log
 
 from .utils import get_spider_list, JsonResource, UtilsCache
+from ConfigParser import SafeConfigParser
+from cStringIO import StringIO
+from pkgutil import get_data
+from collections import defaultdict
 
 class WsResource(JsonResource):
 
@@ -21,6 +25,61 @@ class WsResource(JsonResource):
             log.err()
             r = {"node_name": self.root.nodename, "status": "error", "message": str(e)}
             return self.render_object(r, txrequest)
+
+class Scrape(WsResource):
+
+    def __init__(self, root):
+        WsResource.__init__(self, root)
+        cp = SafeConfigParser()
+        projects_config = get_data(__package__, 'mapping.conf')
+        cp.readfp(StringIO(projects_config))
+        self.projects = cp.sections()
+        self.spider_mappings = []
+        for project in self.projects:
+            # we concatenate all regexp : spider mappings and remember the project they belong to
+            for regexp, spider in cp.items(project):
+                self.spider_mappings.append( (regexp, project, spider) )
+
+    def get_project_spider_list(self, url_list):
+        res = defaultdict(lambda : [])
+        not_matched = []
+        for url in url_list:
+            matched = False
+            for regexp, project, spider in self.spider_mappings:
+                if re.search(regexp, url):
+                    res[project,spider] = res[project,spider] + [url.strip()]
+                    matched = True
+            if not matched:
+                not_matched.append(url)
+        return res, not_matched
+
+    def handle_project_spider(self, args, project, spider, url_list):
+        if not project in self.root.scheduler.list_projects():
+            return {"status": "error", "message": "project %s not found" % project, "matched_urls": url_list}
+        spiders = get_spider_list(project)
+        if not spider in spiders:
+            return {"status": "error", "message": "spider '%s' not found in project '%s'" % (spider, project), "matched_urls": url_list}
+        jobid = uuid.uuid1().hex
+        args['_job'] = jobid
+        args['start_urls'] = "\n".join(url_list) # on its way to constructor this variable becomes string so we can't pass the list directly
+        self.root.scheduler.schedule(project, spider, **args)
+        return {"status": "ok", "jobid": jobid, "matched_urls": url_list, "project": project, "spider": spider}
+
+    def render_POST(self, txrequest):
+        settings = txrequest.args.pop('setting', [])
+        settings = dict(x.split('=', 1) for x in settings)
+        args = dict((k, v[0]) for k, v in txrequest.args.items())
+        args['settings'] = settings
+        ps_list, not_matched = self.get_project_spider_list(args.pop('urls').split(','))
+        jobs = []
+        errors = []
+        for project, spider in ps_list:
+            result = self.handle_project_spider(args, project, spider, ps_list[project, spider])
+            if result['status'] == "ok":
+                jobs.append(result)
+            else:
+                errors.append(result)
+        return {"node_name": self.root.nodename, "jobs": jobs, "errors": errors, "not_matched": not_matched}
 
 class Schedule(WsResource):
 
