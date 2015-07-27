@@ -111,7 +111,7 @@ def get_spider_list(project, runner=None, pythonpath=None):
     out, err = proc.communicate()
     if proc.returncode:
         msg = err or out or 'unknown error'
-        raise RuntimeError(msg.splitlines()[-1])
+        raise RuntimeError(msg)
     tmp = out.splitlines();
     get_spider_list.cache[project] = tmp
     return tmp
